@@ -28,6 +28,11 @@ from ai_interviewer.routers import session, answer
 from ai_interviewer.exceptions import InterviewerBaseError
 from ai_interviewer.logger import get_logger
 
+from code_reviewer.routers import session as reviewer_session_router
+from code_reviewer.routers import review as reviewer_review_router
+
+from roadmap_generator.routers.roadmap import router as roadmap_router
+
 log = get_logger("main")
 
 
@@ -101,6 +106,18 @@ app.add_middleware(
 app.include_router(session.router)  # /interview/start  /{id}/end  /{id}/status
 app.include_router(answer.router)   # /interview/answer/text  /voice  /tts
 
+app.include_router(
+    reviewer_session_router.router,
+    prefix="/coder-reviewer",
+    tags=["Code Reviewer - Session"]
+)
+app.include_router(
+    reviewer_review_router.router,
+    prefix="/coder-reviewer",
+    tags=["Code Reviewer - Actions"]
+)
+
+app.include_router(roadmap_router)
 # Add other agent routers here as the platform grows:
 # from resume_agent.routers  import router as resume_router
 # from roadmap_agent.routers import router as roadmap_router
