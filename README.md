@@ -75,19 +75,19 @@ FastAPI Backend (Student’s Corner)
 
 ```mermaid
 flowchart TD
-    A[Frontend (React / Next.js)] --> B[Spring Boot Middleware]
+    A["Frontend (React / Next.js)"] --> B["Spring Boot Middleware"]
 
-    B --> C[FastAPI Backend (Student's Corner)]
+    B --> C["FastAPI Backend (Student's Corner)"]
 
-    C --> D1[🎙️ AI Interviewer Agent]
-    C --> D2[💻 Code Reviewer Agent]
-    C --> D3[🗺️ Roadmap Generator Agent]
+    C --> D1["🎙️ AI Interviewer Agent"]
+    C --> D2["💻 Code Reviewer Agent"]
+    C --> D3["🗺️ Roadmap Generator Agent"]
 
-    D1 --> E1[OpenAI + ElevenLabs]
-    D2 --> E2[Claude + GPT Validation Loop]
-    D3 --> E3[Claude + GPT Validator]
+    D1 --> E1["OpenAI + ElevenLabs"]
+    D2 --> E2["Claude + GPT Validation Loop"]
+    D3 --> E3["Claude + GPT Validator"]
 
-    B --> F[(Database)]
+    B --> F[("Database")]
 ```
 
 ### 🔍 Flow Explanation
