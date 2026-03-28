@@ -1,40 +1,90 @@
-"""Typed exception hierarchy for the coder_reviewer agent."""
+"""
+Typed exception hierarchy for the code review system.
+"""
 
 
-class CoderReviewerError(Exception):
-    """Base exception for all coder_reviewer errors."""
+class CodeReviewBaseError(Exception):
+    """Base exception for all code review errors."""
+    
+    def __init__(self, message: str, error_code: str, http_status: int = 500):
+        super().__init__(message)
+        self.message = message
+        self.error_code = error_code
+        self.http_status = http_status
 
 
-class SessionNotFoundError(CoderReviewerError):
-    """Raised when a requested session does not exist."""
-
+class SessionNotFoundError(CodeReviewBaseError):
+    """Session ID not found in the session store."""
+    
     def __init__(self, session_id: str):
-        super().__init__(f"Session '{session_id}' not found.")
-        self.session_id = session_id
+        super().__init__(
+            message=f"Session '{session_id}' not found.",
+            error_code="SESSION_NOT_FOUND",
+            http_status=404,
+        )
 
 
-class AgentExecutionError(CoderReviewerError):
-    """Raised when an agent fails during execution."""
-
-    def __init__(self, agent_name: str, reason: str):
-        super().__init__(f"Agent '{agent_name}' failed: {reason}")
-        self.agent_name = agent_name
-        self.reason = reason
-
-
-class MiddlewareError(CoderReviewerError):
-    """Raised when the middleware store call fails."""
-
-    def __init__(self, status_code: int, detail: str):
-        super().__init__(f"Middleware returned {status_code}: {detail}")
-        self.status_code = status_code
-        self.detail = detail
+class SessionAlreadyCompletedError(CodeReviewBaseError):
+    """Session has already been completed."""
+    
+    def __init__(self, session_id: str):
+        super().__init__(
+            message=f"Session '{session_id}' is already completed.",
+            error_code="SESSION_ALREADY_COMPLETED",
+            http_status=409,
+        )
 
 
-class JSONParseError(CoderReviewerError):
-    """Raised when an LLM response cannot be parsed as JSON."""
+class SessionCreationFailedError(CodeReviewBaseError):
+    """Failed to create a new review session."""
+    
+    def __init__(self, reason: str):
+        super().__init__(
+            message=f"Failed to create review session: {reason}",
+            error_code="SESSION_CREATION_FAILED",
+            http_status=500,
+        )
 
-    def __init__(self, agent_name: str, raw: str):
-        super().__init__(f"Could not parse JSON from agent '{agent_name}'. Raw: {raw[:200]}")
-        self.agent_name = agent_name
-        self.raw = raw
+
+class AgentError(CodeReviewBaseError):
+    """An LLM agent failed to process the request."""
+    
+    def __init__(self, agent_name: str, details: str):
+        super().__init__(
+            message=f"{agent_name} failed: {details}",
+            error_code="AGENT_ERROR",
+            http_status=502,
+        )
+
+
+class AgentTimeoutError(CodeReviewBaseError):
+    """An LLM agent timed out."""
+    
+    def __init__(self, agent_name: str):
+        super().__init__(
+            message=f"{agent_name} did not respond within the timeout period.",
+            error_code="AGENT_TIMEOUT",
+            http_status=504,
+        )
+
+
+class InvalidInputError(CodeReviewBaseError):
+    """Invalid input provided by the user."""
+    
+    def __init__(self, details: str):
+        super().__init__(
+            message=f"Invalid input: {details}",
+            error_code="INVALID_INPUT",
+            http_status=422,
+        )
+
+
+class MiddlewareDispatchFailedError(CodeReviewBaseError):
+    """Failed to dispatch session data to middleware."""
+    
+    def __init__(self, details: str):
+        super().__init__(
+            message=f"Failed to dispatch session to middleware: {details}",
+            error_code="MIDDLEWARE_DISPATCH_FAILED",
+            http_status=502,
+        )

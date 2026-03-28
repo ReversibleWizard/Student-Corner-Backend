@@ -1,80 +1,63 @@
-"""Orchestrator for the multi-agent code review pipeline.
-
-Pipeline:
-  Code Understanding (Claude) →
-  Technical Review / Fix (Claude) →
-  Code Quality Review (GPT) →
-  [optional] Optimize (Claude ↔ GPT loop) →
-  [optional] Chat Refinement (Claude ↔ GPT loop)
 """
+Code Reviewer Agent — Central orchestrator for the multi-agent pipeline.
 
-from __future__ import annotations
-
-import json
+Flow:
+  Claude Understander → Claude Technical Reviewer → GPT Quality Reviewer
+  → Claude Optimizer (validated by GPT) → Claude Chat Refiner (validated by GPT)
+"""
 import os
+import json
 import re
-
-from agents import Agent, Runner, trace
 from openai import OpenAI
+from agents import Runner, Agent
 
-from .exceptions import AgentExecutionError, JSONParseError
-from .logger import get_logger
-from .models import (
+from code_reviewer.models import (
+    CodeUnderstanding,
+    TechnicalReview,
+    QualityReview,
+    OptimizationResult,
     ChatRefinementResult,
-    OptimizeResult,
-    QualityReviewResult,
-    ReviewSession,
-    TechnicalReviewResult,
-    UnderstandingResult,
+    ValidationResult,
 )
+from code_reviewer.exceptions import AgentError, AgentTimeoutError
+from code_reviewer.logger import get_logger
 
-logger = get_logger(__name__)
-
-# ---------------------------------------------------------------------------
-# JSON helpers
-# ---------------------------------------------------------------------------
+log = get_logger("reviewer_agent")
 
 
-def _clean_json(text: str) -> str:
+# ─── Helper Utilities ─────────────────────────────────────────────────────────
+
+def clean_json_output(text: str) -> str:
+    """Strip markdown code fences from LLM JSON responses."""
     text = text.strip()
     if text.startswith("```"):
         lines = text.split("\n")
+        # drop first line (```json or ```) and last line (```)
         text = "\n".join(lines[1:-1]).strip()
     return text
 
 
-def _extract_json(text: str) -> str:
-    text = _clean_json(text)
+def extract_json(text: str) -> str:
+    """Extract first JSON object from text, even if surrounded by prose."""
+    text = clean_json_output(text)
     match = re.search(r"\{.*\}", text, re.DOTALL)
     return match.group(0) if match else text
 
 
-def _safe_parse(text: str, agent_name: str) -> dict:
-    for fn in (_clean_json, _extract_json):
+def safe_json_parse(text: str) -> dict | None:
+    """Parse JSON safely — tries clean → extract → fail gracefully."""
+    for fn in (clean_json_output, extract_json):
         try:
             return json.loads(fn(text))
         except json.JSONDecodeError:
             pass
-    raise JSONParseError(agent_name, text)
+    log.error("JSON parse failed. Raw output: %s", text)
+    return None
 
 
-# ---------------------------------------------------------------------------
-# Shared OpenAI-compat client (points at Anthropic)
-# ---------------------------------------------------------------------------
+# ─── Agent System Prompts ─────────────────────────────────────────────────────
 
-
-def _claude_client() -> OpenAI:
-    return OpenAI(
-        api_key=os.environ["ANTHROPIC_API_KEY"],
-        base_url="https://api.anthropic.com/v1/",
-    )
-
-
-# ---------------------------------------------------------------------------
-# System prompts
-# ---------------------------------------------------------------------------
-
-_UNDERSTANDER_SYSTEM = """
+UNDERSTANDER_SYSTEM = """
 You are an experienced developer specialized in understanding code written by others.
 
 Your job is to analyze code and return structured JSON with:
@@ -108,7 +91,7 @@ Response format:
 }
 """
 
-_CORRECTOR_SYSTEM = """
+CORRECTOR_SYSTEM = """
 You are a senior software engineer and expert code reviewer.
 
 Your job is NOT to understand the code from scratch.
@@ -152,10 +135,10 @@ STRICT RULES:
 - Be critical and precise (like a real interviewer)
 - corrected_code must be valid and runnable
 - If no tool improvement needed, return []
-- confidence must be 0–1
+- confidence must be 0-1
 """
 
-_QUALITY_SYSTEM = """
+QUALITY_SYSTEM = """
 You are a senior software engineer performing a professional code review.
 
 Your job is to evaluate code quality, maintainability, and production readiness.
@@ -195,13 +178,13 @@ FORMAT:
 }
 
 STRICT RULES:
-- readability_score: 0–10
+- readability_score: 0-10
 - Be critical and realistic
-- final_summary: 2–3 lines
-- confidence: 0–1
+- final_summary: 2-3 lines
+- confidence: 0-1
 """
 
-_OPTIMIZER_SYSTEM = """
+OPTIMIZER_SYSTEM = """
 You are an expert software engineer specializing in code optimization.
 
 Your role is to produce a fully optimized, production-ready version of the code
@@ -227,25 +210,7 @@ FORMAT:
 }
 """
 
-_VALIDATOR_SYSTEM = """
-You are a strict code validator.
-
-You will receive code and must check:
-  - Correctness and logical validity
-  - Whether requested improvements were applied
-  - Whether the code is runnable
-
-Return ONLY valid JSON. Do NOT wrap in ```json or ```.
-
-FORMAT:
-{
-  "valid": true,
-  "issues": ["..."],
-  "feedback": "..."
-}
-"""
-
-_CHAT_SYSTEM = """
+CHAT_SYSTEM = """
 You are an expert software engineer helping refine and modify code based on user requests.
 
 Responsibilities:
@@ -266,207 +231,295 @@ FORMAT:
 }
 """
 
-# ---------------------------------------------------------------------------
-# GPT agents (OpenAI Agents SDK)
-# ---------------------------------------------------------------------------
+VALIDATOR_SYSTEM = """
+You are a strict code validator.
 
-_gpt_quality_agent = Agent(
+You will receive code and must check:
+  - Correctness and logical validity
+  - Whether requested improvements were applied
+  - Whether the code is runnable
+
+Return ONLY valid JSON. Do NOT wrap in ```json or ```.
+
+FORMAT:
+{
+  "valid": true,
+  "issues": ["..."],
+  "feedback": "..."
+}
+"""
+
+
+# ─── Agent Instances ──────────────────────────────────────────────────────────
+
+# GPT agents using OpenAI Agents SDK
+code_quality_agent = Agent(
     name="Code Quality Reviewer",
-    instructions=_QUALITY_SYSTEM,
+    instructions=QUALITY_SYSTEM,
     model="gpt-4o-mini",
 )
 
-_gpt_validator_agent = Agent(
+gpt_validator_agent = Agent(
     name="GPT Code Validator",
-    instructions=_VALIDATOR_SYSTEM,
+    instructions=VALIDATOR_SYSTEM,
     model="gpt-4o-mini",
 )
 
 
-# ---------------------------------------------------------------------------
-# Individual agent runners
-# ---------------------------------------------------------------------------
+# ─── Agent Functions ──────────────────────────────────────────────────────────
+
+def run_code_understander(code: str) -> CodeUnderstanding:
+    """Run Claude Sonnet for code understanding."""
+    try:
+        client = OpenAI(
+            api_key=os.environ.get("ANTHROPIC_API_KEY"),
+            base_url="https://api.anthropic.com/v1/",
+        )
+        
+        user_message = f"Analyze the following code:\n\nCode:\n{code}"
+        
+        response = client.chat.completions.create(
+            model="claude-sonnet-4-6",
+            messages=[
+                {"role": "system", "content": UNDERSTANDER_SYSTEM},
+                {"role": "user", "content": user_message},
+            ],
+        )
+        
+        output = response.choices[0].message.content
+        parsed = safe_json_parse(output)
+        
+        if not parsed:
+            raise AgentError("Code Understander", "Failed to parse JSON output")
+        
+        return CodeUnderstanding(**parsed)
+    
+    except Exception as e:
+        log.exception("Code Understander failed")
+        raise AgentError("Code Understander", str(e))
 
 
-def run_understanding(code: str) -> UnderstandingResult:
-    client = _claude_client()
-    response = client.chat.completions.create(
-        model="claude-sonnet-4-6",
-        messages=[
-            {"role": "system", "content": _UNDERSTANDER_SYSTEM},
-            {"role": "user", "content": f"Analyze the following code:\n\nCode:\n{code}"},
-        ],
+def run_technical_reviewer(code: str, understanding: CodeUnderstanding) -> TechnicalReview:
+    """Run Claude Opus for technical review and bug detection."""
+    try:
+        client = OpenAI(
+            api_key=os.environ.get("ANTHROPIC_API_KEY"),
+            base_url="https://api.anthropic.com/v1/",
+        )
+        
+        user_message = (
+            f"Code understanding from previous agent:\n{understanding.model_dump_json(indent=2)}\n\n"
+            f"Code:\n{code}"
+        )
+        
+        response = client.chat.completions.create(
+            model="claude-opus-4-6",
+            messages=[
+                {"role": "system", "content": CORRECTOR_SYSTEM},
+                {"role": "user", "content": user_message},
+            ],
+        )
+        
+        output = response.choices[0].message.content
+        parsed = safe_json_parse(output)
+        
+        if not parsed:
+            raise AgentError("Technical Reviewer", "Failed to parse JSON output")
+        
+        return TechnicalReview(**parsed)
+    
+    except Exception as e:
+        log.exception("Technical Reviewer failed")
+        raise AgentError("Technical Reviewer", str(e))
+
+
+async def run_quality_reviewer(
+    code: str,
+    understanding: CodeUnderstanding,
+    technical_review: TechnicalReview
+) -> QualityReview:
+    """Run GPT for code quality and maintainability review."""
+    try:
+        input_text = (
+            f"Code:\n{code}\n\n"
+            f"Understanding:\n{understanding.model_dump_json(indent=2)}\n\n"
+            f"Technical Review:\n{technical_review.model_dump_json(indent=2)}"
+        )
+        
+        result = await Runner.run(code_quality_agent, input=input_text)
+        parsed = safe_json_parse(result.final_output)
+        
+        if not parsed:
+            raise AgentError("Quality Reviewer", "Failed to parse JSON output")
+        
+        return QualityReview(**parsed)
+    
+    except Exception as e:
+        log.exception("Quality Reviewer failed")
+        raise AgentError("Quality Reviewer", str(e))
+
+
+def call_claude_optimizer(user_message: str) -> str:
+    """Call Claude Opus with the optimizer system prompt."""
+    client = OpenAI(
+        api_key=os.environ.get("ANTHROPIC_API_KEY"),
+        base_url="https://api.anthropic.com/v1/",
     )
-    raw = response.choices[0].message.content
-    data = _safe_parse(raw, "CodeUnderstander")
-    return UnderstandingResult(**data)
-
-
-def run_technical_review(code: str, understanding: UnderstandingResult) -> TechnicalReviewResult:
-    client = _claude_client()
-    user_message = (
-        f"Code understanding from previous agent:\n{understanding.model_dump()}\n\n"
-        f"Code:\n{code}"
-    )
+    
     response = client.chat.completions.create(
         model="claude-opus-4-6",
         messages=[
-            {"role": "system", "content": _CORRECTOR_SYSTEM},
+            {"role": "system", "content": OPTIMIZER_SYSTEM},
             {"role": "user", "content": user_message},
         ],
     )
-    raw = response.choices[0].message.content
-    data = _safe_parse(raw, "TechnicalReviewer")
-    return TechnicalReviewResult(**data)
+    
+    return response.choices[0].message.content
 
 
-async def run_quality_review(
+async def optimize_code_with_validation(
     code: str,
-    understanding: UnderstandingResult,
-    technical_review: TechnicalReviewResult,
-) -> QualityReviewResult:
-    input_text = (
-        f"Code:\n{code}\n\n"
-        f"Understanding:\n{understanding.model_dump()}\n\n"
-        f"Technical Review:\n{technical_review.model_dump()}"
-    )
-    with trace("CodeQualityAgent"):
-        result = await Runner.run(_gpt_quality_agent, input=input_text)
-    data = _safe_parse(result.final_output, "QualityReviewer")
-    return QualityReviewResult(**data)
-
-
-async def run_optimizer(
-    code: str,
-    session: ReviewSession,
-    max_iters: int = 3,
-) -> str:
-    """Claude optimizes; GPT validates. Returns final optimized code."""
-    client = _claude_client()
-    feedback: str | None = None
-    current = code
-
+    understanding: CodeUnderstanding,
+    technical_review: TechnicalReview,
+    quality_review: QualityReview,
+    max_iters: int = 3
+) -> OptimizationResult:
+    """
+    Iteratively optimize code with Claude and validate with GPT.
+    
+    Returns the final OptimizationResult after validation.
+    """
+    feedback = None
+    
     for i in range(max_iters):
-        logger.info("Optimizer iteration %d/%d", i + 1, max_iters)
-
+        log.info(f"Claude Optimization Iteration {i + 1}")
+        
         user_prompt = (
             f"Optimize this code to production level based on the following reviews.\n\n"
-            f"Understanding:\n{session.understanding.model_dump() if session.understanding else 'N/A'}\n\n"
-            f"Technical Review:\n{session.technical_review.model_dump() if session.technical_review else 'N/A'}\n\n"
-            f"Quality Review:\n{session.quality_review.model_dump() if session.quality_review else 'N/A'}\n\n"
+            f"Understanding:\n{understanding.model_dump_json(indent=2)}\n\n"
+            f"Technical Review:\n{technical_review.model_dump_json(indent=2)}\n\n"
+            f"Quality Review:\n{quality_review.model_dump_json(indent=2)}\n\n"
             f"Previous Feedback (if any):\n{feedback}\n\n"
-            f"Code:\n{current}"
+            f"Code:\n{code}"
         )
-
-        resp = client.chat.completions.create(
-            model="claude-opus-4-6",
-            messages=[
-                {"role": "system", "content": _OPTIMIZER_SYSTEM},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
-        raw = resp.choices[0].message.content
-        parsed = _safe_parse(raw, "Optimizer")
-        opt_result = OptimizeResult(**parsed)
-        optimized_code = opt_result.optimized_code
-
+        
+        claude_output = call_claude_optimizer(user_prompt)
+        claude_json = safe_json_parse(claude_output)
+        
+        if not claude_json:
+            log.error("Claude returned unparseable output")
+            raise AgentError("Optimizer", "Failed to parse JSON output")
+        
+        optimized_code = claude_json["optimized_code"]
+        log.info(f"Changes made: {claude_json.get('changes_made')}")
+        
+        # Validate with GPT
+        log.info("GPT Validation...")
         gpt_prompt = (
             f"Check if the optimized code satisfies:\n"
             f"- correctness\n- improvements suggested earlier\n- is runnable\n\n"
-            f'Return JSON: {{"valid": true/false, "issues": [...], "feedback": "..."}}\n\n'
+            f"Return JSON: {{\"valid\": true/false, \"issues\": [...], \"feedback\": \"...\"}}\n\n"
             f"Code:\n{optimized_code}"
         )
-        gpt_result = await Runner.run(_gpt_validator_agent, input=gpt_prompt)
-        gpt_json = _safe_parse(gpt_result.final_output, "GPTValidator")
+        
+        gpt_result = await Runner.run(gpt_validator_agent, input=gpt_prompt)
+        gpt_json = safe_json_parse(gpt_result.final_output)
+        
+        if gpt_json and gpt_json.get("valid"):
+            log.info("Optimization successful")
+            return OptimizationResult(**claude_json)
+        
+        issues = gpt_json.get("issues") if gpt_json else "parse error"
+        log.warning(f"Optimization needs improvement: {issues}")
+        feedback = gpt_json.get("feedback") if gpt_json else ""
+        code = optimized_code  # iterative refinement
+    
+    log.warning("Max iterations reached — returning last version")
+    return OptimizationResult(**claude_json)
 
-        if gpt_json.get("valid"):
-            logger.info("Optimization validated on iteration %d", i + 1)
-            return optimized_code
 
-        feedback = gpt_json.get("feedback", "")
-        current = optimized_code
+def call_claude_chat(user_message: str) -> str:
+    """Call Claude Opus with the chat-refinement system prompt."""
+    client = OpenAI(
+        api_key=os.environ.get("ANTHROPIC_API_KEY"),
+        base_url="https://api.anthropic.com/v1/",
+    )
+    
+    response = client.chat.completions.create(
+        model="claude-opus-4-6",
+        messages=[
+            {"role": "system", "content": CHAT_SYSTEM},
+            {"role": "user", "content": user_message},
+        ],
+    )
+    
+    return response.choices[0].message.content
 
-    logger.warning("Optimizer hit max iterations — returning last version")
-    return current
 
-
-async def run_chat_refinement(
+async def refine_code_with_chat(
     code: str,
-    session: ReviewSession,
-    user_query: str,
-    max_iters: int = 3,
+    understanding: CodeUnderstanding,
+    technical_review: TechnicalReview,
+    user_instruction: str,
+    max_iters: int = 3
 ) -> ChatRefinementResult:
-    """Apply user-requested changes with Claude, validate with GPT."""
-    client = _claude_client()
-    feedback: str | None = None
-    current = code
-
+    """
+    Apply user-requested changes with Claude, validate with GPT.
+    
+    Args:
+        code: Current code to refine
+        understanding: Initial code understanding
+        technical_review: Initial technical review
+        user_instruction: User's custom instruction (e.g., 'Convert to Java')
+        max_iters: Maximum validation iterations
+        
+    Returns:
+        ChatRefinementResult with updated code
+    """
+    feedback = None
+    
     for i in range(max_iters):
-        logger.info("Chat refinement iteration %d/%d", i + 1, max_iters)
-
+        log.info(f"Claude Chat Iteration {i + 1}")
+        
         user_prompt = (
             f"Modify the code based on the user request.\n\n"
-            f"User Request:\n{user_query}\n\n"
-            f"Understanding:\n{session.understanding.model_dump() if session.understanding else 'N/A'}\n\n"
-            f"Technical Review:\n{session.technical_review.model_dump() if session.technical_review else 'N/A'}\n\n"
+            f"User Request:\n{user_instruction}\n\n"
+            f"Understanding:\n{understanding.model_dump_json(indent=2)}\n\n"
+            f"Technical Review:\n{technical_review.model_dump_json(indent=2)}\n\n"
             f"Previous Feedback (if any):\n{feedback}\n\n"
-            f"Code:\n{current}"
+            f"Code:\n{code}"
         )
-
-        resp = client.chat.completions.create(
-            model="claude-opus-4-6",
-            messages=[
-                {"role": "system", "content": _CHAT_SYSTEM},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
-        raw = resp.choices[0].message.content
-        parsed = _safe_parse(raw, "ChatRefiner")
-        chat_result = ChatRefinementResult(**parsed)
-        updated_code = chat_result.updated_code
-
+        
+        claude_output = call_claude_chat(user_prompt)
+        claude_json = safe_json_parse(claude_output)
+        
+        if not claude_json:
+            log.error("Claude returned unparseable output")
+            raise AgentError("Chat Refiner", "Failed to parse JSON output")
+        
+        updated_code = claude_json["updated_code"]
+        log.info(f"Changes: {claude_json.get('changes_made')}")
+        
+        # Validate with GPT
+        log.info("GPT Validation...")
         gpt_prompt = (
             f"Check:\n- Is this code correct?\n- Is it runnable?\n"
-            f"- Does it satisfy the user request: '{user_query}'?\n\n"
-            f'Return JSON: {{"valid": true/false, "issues": [...], "feedback": "..."}}\n\n'
+            f"- Does it satisfy the user request: '{user_instruction}'?\n\n"
+            f"Return JSON: {{\"valid\": true/false, \"issues\": [...], \"feedback\": \"...\"}}\n\n"
             f"Code:\n{updated_code}"
         )
-        gpt_result = await Runner.run(_gpt_validator_agent, input=gpt_prompt)
-        gpt_json = _safe_parse(gpt_result.final_output, "GPTValidator")
-
-        if gpt_json.get("valid"):
-            logger.info("Chat refinement validated on iteration %d", i + 1)
-            return ChatRefinementResult(
-                updated_code=updated_code,
-                changes_made=chat_result.changes_made,
-                explanation=chat_result.explanation,
-            )
-
-        feedback = gpt_json.get("feedback", "")
-        current = updated_code
-
-    logger.warning("Chat refinement hit max iterations — returning last version")
-    return chat_result
-
-
-# ---------------------------------------------------------------------------
-# Full pipeline
-# ---------------------------------------------------------------------------
-
-
-async def run_full_review(code: str, session: ReviewSession) -> ReviewSession:
-    """Run the 3-agent initial pipeline and mutate session in place."""
-    logger.info("[%s] Starting full review pipeline", session.session_id)
-
-    session.understanding = run_understanding(code)
-    logger.info("[%s] Understanding done", session.session_id)
-
-    session.technical_review = run_technical_review(code, session.understanding)
-    logger.info("[%s] Technical review done", session.session_id)
-
-    session.quality_review = await run_quality_review(
-        code, session.understanding, session.technical_review
-    )
-    logger.info("[%s] Quality review done", session.session_id)
-
-    return session
+        
+        gpt_result = await Runner.run(gpt_validator_agent, input=gpt_prompt)
+        gpt_json = safe_json_parse(gpt_result.final_output)
+        
+        if gpt_json and gpt_json.get("valid"):
+            log.info("Chat refinement successful")
+            return ChatRefinementResult(**claude_json)
+        
+        issues = gpt_json.get("issues") if gpt_json else "parse error"
+        log.warning(f"Chat refinement needs fix: {issues}")
+        feedback = gpt_json.get("feedback") if gpt_json else ""
+        code = updated_code
+    
+    log.warning("Max iterations reached — returning last version")
+    return ChatRefinementResult(**claude_json)

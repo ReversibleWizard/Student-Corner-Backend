@@ -1,17 +1,29 @@
 """
-AI Interview Platform — FastAPI root entry point.
+Student's Corner — FastAPI Backend Entry Point
 
 Run:        uvicorn main:app --reload --port 8000
 Production: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
 Docs:       http://127.0.0.1:8000/docs
 
-Architecture note:
-  - Resume parsing is the Spring Boot middleware's responsibility.
-    The middleware sends pre-extracted plain text in `resume_text`
-    when calling POST /interview/start.
-  - On session completion the backend automatically POSTs the full
-    session payload (questions, answers, scores, voice reviews, summary)
-    to the middleware via MIDDLEWARE_URL for persistent storage.
+Platform Overview:
+  - Student's Corner is a multi-agent AI backend providing:
+      • AI Interview System (voice + text evaluation)
+      • Code Review & Optimization
+      • Adaptive Learning Roadmap Generation
+
+Architecture Notes:
+  - Spring Boot Middleware acts as the central gateway:
+      • Handles authentication
+      • Parses resume PDFs → sends plain text
+      • Stores session data in database
+
+  - FastAPI Backend routes requests to domain-specific agents:
+      • /interview → AI Interviewer Agent
+      • /review    → Code Reviewer Agent
+      • /roadmap   → Roadmap Generator Agent
+
+  - On session completion, each agent automatically dispatches
+    structured results back to the middleware via MIDDLEWARE_URL.
 """
 import os
 from contextlib import asynccontextmanager
@@ -28,8 +40,9 @@ from ai_interviewer.routers import session, answer
 from ai_interviewer.exceptions import InterviewerBaseError
 from ai_interviewer.logger import get_logger
 
-from code_reviewer.routers import session as reviewer_session_router
-from code_reviewer.routers import review as reviewer_review_router
+from code_reviewer.routers import review, chat
+from code_reviewer.exceptions import CodeReviewBaseError
+from code_reviewer.logger import get_logger
 
 from roadmap_generator.routers.roadmap import router as roadmap_router
 
@@ -42,10 +55,11 @@ log = get_logger("main")
 async def lifespan(app: FastAPI):
     """Validate critical environment variables on startup."""
     log.info("=" * 60)
-    log.info("AI Interview Platform starting up")
+    log.info("Student's Corner starting up")
 
     required = {
         "OPENAI_API_KEY":      os.getenv("OPENAI_API_KEY"),
+        "ANTHROPIC_API_KEY":   os.getenv("ANTHROPIC_API_KEY"),
         "ELEVENLABS_API_KEY":  os.getenv("ELEVENLABS_API_KEY"),
         "ELEVENLABS_AGENT_ID": os.getenv("ELEVENLABS_AGENT_ID"),
     }
@@ -70,16 +84,22 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="🎙️ AI Interview Platform",
+    title="🎓 Student's Corner — AI Career & Learning Platform",
     description=(
-        "Multi-agent AI interview system.\n\n"
-        "**Features:**\n"
-        "- Voice input via ElevenLabs Conversational Agent (transcript + delivery review)\n"
-        "- Text fallback input\n"
-        "- Adaptive question generation based on candidate performance\n"
-        "- Automatic session storage dispatch to Spring Boot middleware on completion\n\n"
-        "**Resume:** Pre-parsed plain text sent by the middleware in `resume_text` — "
-        "no PDF handling in this service."
+        "A multi-agent AI platform designed as a one-stop solution for student needs.\n\n"
+        
+        "🚀 **Core Features:**\n"
+        "- 🎙️ AI Interview System (voice + text, real-time evaluation)\n"
+        "- 💻 Code Review & Optimization (Claude ↔ GPT validation loop)\n"
+        "- 🗺️ Adaptive Roadmap Generation (personalized learning paths)\n\n"
+        
+        "🏗️ **Architecture:**\n"
+        "- Spring Boot middleware for authentication, resume parsing, and persistence\n"
+        "- FastAPI backend orchestrating multiple AI agents\n"
+        "- Integration with OpenAI, Anthropic, and ElevenLabs APIs\n\n"
+        
+        "📌 **Note:** Resume parsing is handled by the middleware. "
+        "This service operates purely on structured input and AI-driven processing."
     ),
     version="1.0.0",
     lifespan=lifespan,
@@ -106,16 +126,8 @@ app.add_middleware(
 app.include_router(session.router)  # /interview/start  /{id}/end  /{id}/status
 app.include_router(answer.router)   # /interview/answer/text  /voice  /tts
 
-app.include_router(
-    reviewer_session_router.router,
-    prefix="/coder-reviewer",
-    tags=["Code Reviewer - Session"]
-)
-app.include_router(
-    reviewer_review_router.router,
-    prefix="/coder-reviewer",
-    tags=["Code Reviewer - Actions"]
-)
+app.include_router(review.router)  # /review/start  /{id}/status  /{id}/optimize
+app.include_router(chat.router)    # /review/{id}/chat
 
 app.include_router(roadmap_router)
 # Add other agent routers here as the platform grows:
@@ -179,7 +191,7 @@ async def unhandled_error_handler(request: Request, exc: Exception):
 
 @app.get("/", tags=["Health"])
 async def root():
-    return {"status": "ok", "message": "AI Interview Platform is running 🎙️"}
+    return {"status": "ok", "message": "Student's Corner is running 🎙️"}
 
 
 @app.get("/health", tags=["Health"])
