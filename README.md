@@ -75,32 +75,70 @@ FastAPI Backend (Student’s Corner)
 
 ```mermaid
 flowchart TD
-    A["Frontend (React / Next.js)"] --> B["Spring Boot Middleware"]
 
-    %% Middleware handles auth & user management
-    B --> M_DB[("User Database (Secure)")]
-    
-    %% Middleware forwards request to AI backend
-    B --> C["FastAPI Backend (Student's Corner)"]
+    %% =======================
+    %% Frontend Layer
+    %% =======================
+    A["Frontend (React / Next.js)"]
 
-    %% AI Agents
-    C --> D1["🎙️ AI Interviewer Agent"]
-    C --> D2["💻 Code Reviewer Agent"]
-    C --> D3["🗺️ Roadmap Generator Agent"]
+    %% =======================
+    %% Middleware Layer
+    %% =======================
+    B["Spring Boot Middleware"]
+    M_DB[("User Database (Secure)")]
 
-    %% External AI Services
-    D1 --> E1["OpenAI + ElevenLabs"]
-    D2 --> E2["Claude + GPT Validation Loop"]
-    D3 --> E3["Claude + GPT Validator"]
+    %% =======================
+    %% Backend Layer
+    %% =======================
+    C["FastAPI Backend (Student's Corner)"]
 
-    %% Application Data Database (ONLY AI interactions)
-    C --> A_DB[("Application Database")]
-    D1 --> A_DB
-    D2 --> A_DB
-    D3 --> A_DB
+    %% =======================
+    %% Agent Layer
+    %% =======================
+    subgraph Agents
+        D1["🎙️ AI Interviewer"]
+        D2["💻 Code Reviewer"]
+        D3["🗺️ Roadmap Generator"]
+    end
 
-    %% Metadata Stored
-    A_DB --> G["Stores: user_id (ref), app_id, request, response, timestamps"]
+    %% =======================
+    %% External Services
+    %% =======================
+    subgraph AI_Services
+        E1["OpenAI + ElevenLabs"]
+        E2["Claude + GPT Loop"]
+        E3["Claude + GPT Validator"]
+    end
+
+    %% =======================
+    %% Application DB
+    %% =======================
+    A_DB[("Application Database")]
+    META["Stores:\nuser_id (ref), app_id,\nrequest, response, timestamps"]
+
+    %% =======================
+    %% FLOW
+    %% =======================
+
+    A --> B
+
+    %% Middleware responsibilities
+    B --> M_DB
+    B --> C
+
+    %% Backend to agents
+    C --> D1
+    C --> D2
+    C --> D3
+
+    %% Agents to AI services
+    D1 --> E1
+    D2 --> E2
+    D3 --> E3
+
+    %% Clean DB write path (ONLY from backend)
+    C --> A_DB
+    A_DB --> META
 ```
 
 ### 🔍 Flow Explanation
