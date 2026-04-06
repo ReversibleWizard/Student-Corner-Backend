@@ -111,10 +111,9 @@ flowchart TD
     end
 
     %% =======================
-    %% Application Database (CENTERED)
+    %% Application Database (BOTTOM CENTER)
     %% =======================
     A_DB[("Application Database")]
-    META["Stores:\nuser_id (ref), app_id,\nrequest, response, timestamps"]
 
     %% =======================
     %% FLOW
@@ -122,11 +121,11 @@ flowchart TD
 
     A --> B
 
-    %% Middleware responsibilities
+    %% Middleware
     B --> M_DB
     B --> C
 
-    %% Backend to agents
+    %% Backend to Agents
     C --> D1
     C --> D2
     C --> D3
@@ -136,9 +135,11 @@ flowchart TD
     D2 --> E2
     D3 --> E3
 
-    %% 🔥 Centered DB flow (clean vertical alignment)
-    C --> A_DB
-    A_DB --> META
+    %% 🔥 KEY CHANGE: All services → Application DB (bottom)
+    E1 --> A_DB
+    E2 --> A_DB
+    E3 --> A_DB
+
 ```
 
 ### 🔍 Flow Explanation
