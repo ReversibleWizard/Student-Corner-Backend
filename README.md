@@ -77,9 +77,13 @@ FastAPI Backend (Student’s Corner)
 flowchart TD
     A["Frontend (React / Next.js)"] --> B["Spring Boot Middleware"]
 
+    %% Middleware handles auth & user management
+    B --> M_DB[("User Database (Secure)")]
+    
+    %% Middleware forwards request to AI backend
     B --> C["FastAPI Backend (Student's Corner)"]
 
-    %% Agents
+    %% AI Agents
     C --> D1["🎙️ AI Interviewer Agent"]
     C --> D2["💻 Code Reviewer Agent"]
     C --> D3["🗺️ Roadmap Generator Agent"]
@@ -89,17 +93,14 @@ flowchart TD
     D2 --> E2["Claude + GPT Validation Loop"]
     D3 --> E3["Claude + GPT Validator"]
 
-    %% Database interactions
-    B --> F[("Database")]
+    %% Application Data Database (ONLY AI interactions)
+    C --> A_DB[("Application Database")]
+    D1 --> A_DB
+    D2 --> A_DB
+    D3 --> A_DB
 
-    %% History Storage Flow
-    C --> F
-    D1 --> F
-    D2 --> F
-    D3 --> F
-
-    %% Metadata Note
-    F --> G["Stores: user_id, app_id, request, response, timestamps"]
+    %% Metadata Stored
+    A_DB --> G["Stores: user_id (ref), app_id, request, response, timestamps"]
 ```
 
 ### 🔍 Flow Explanation
