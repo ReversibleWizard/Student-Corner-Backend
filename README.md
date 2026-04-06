@@ -79,15 +79,27 @@ flowchart TD
 
     B --> C["FastAPI Backend (Student's Corner)"]
 
+    %% Agents
     C --> D1["🎙️ AI Interviewer Agent"]
     C --> D2["💻 Code Reviewer Agent"]
     C --> D3["🗺️ Roadmap Generator Agent"]
 
+    %% External AI Services
     D1 --> E1["OpenAI + ElevenLabs"]
     D2 --> E2["Claude + GPT Validation Loop"]
     D3 --> E3["Claude + GPT Validator"]
 
+    %% Database interactions
     B --> F[("Database")]
+
+    %% History Storage Flow
+    C --> F
+    D1 --> F
+    D2 --> F
+    D3 --> F
+
+    %% Metadata Note
+    F --> G["Stores: user_id, app_id, request, response, timestamps"]
 ```
 
 ### 🔍 Flow Explanation
