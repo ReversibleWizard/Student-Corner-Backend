@@ -76,70 +76,46 @@ FastAPI Backend (Student’s Corner)
 ```mermaid
 flowchart TD
 
-    %% =======================
-    %% Frontend Layer
-    %% =======================
+    %% Frontend
     A["Frontend (React / Next.js)"]
 
-    %% =======================
-    %% Middleware Layer
-    %% =======================
+    %% Middleware
     B["Spring Boot Middleware"]
     M_DB[("User Database (Secure)")]
 
-    %% =======================
-    %% Backend Layer
-    %% =======================
+    %% Backend
     C["FastAPI Backend (Student's Corner)"]
 
-    %% =======================
-    %% Agents Layer
-    %% =======================
-    subgraph Agents
-        D1["🎙️ AI Interviewer"]
-        D2["💻 Code Reviewer"]
-        D3["🗺️ Roadmap Generator"]
-    end
+    %% Agents
+    D1["🎙️ AI Interviewer"]
+    D2["💻 Code Reviewer"]
+    D3["🗺️ Roadmap Generator"]
 
-    %% =======================
-    %% AI Services Layer
-    %% =======================
-    subgraph AI_Services
-        E1["OpenAI + ElevenLabs"]
-        E2["Claude + GPT Loop"]
-        E3["Claude + GPT Validator"]
-    end
+    %% AI Services
+    E1["OpenAI + ElevenLabs"]
+    E2["Claude + GPT Loop"]
+    E3["Claude + GPT Validator"]
 
-    %% =======================
-    %% Application Database (BOTTOM CENTER)
-    %% =======================
+    %% Application DB (Bottom)
     A_DB[("Application Database")]
 
-    %% =======================
-    %% FLOW
-    %% =======================
-
+    %% Flow
     A --> B
 
-    %% Middleware
     B --> M_DB
     B --> C
 
-    %% Backend to Agents
     C --> D1
     C --> D2
     C --> D3
 
-    %% Agents to AI services
     D1 --> E1
     D2 --> E2
     D3 --> E3
 
-    %% 🔥 KEY CHANGE: All services → Application DB (bottom)
     E1 --> A_DB
     E2 --> A_DB
     E3 --> A_DB
-
 ```
 
 ### 🔍 Flow Explanation
