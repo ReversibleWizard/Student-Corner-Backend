@@ -93,7 +93,7 @@ flowchart TD
     C["FastAPI Backend (Student's Corner)"]
 
     %% =======================
-    %% Agent Layer
+    %% Agents Layer
     %% =======================
     subgraph Agents
         D1["🎙️ AI Interviewer"]
@@ -102,7 +102,7 @@ flowchart TD
     end
 
     %% =======================
-    %% External Services
+    %% AI Services Layer
     %% =======================
     subgraph AI_Services
         E1["OpenAI + ElevenLabs"]
@@ -111,7 +111,7 @@ flowchart TD
     end
 
     %% =======================
-    %% Application DB
+    %% Application Database (CENTERED)
     %% =======================
     A_DB[("Application Database")]
     META["Stores:\nuser_id (ref), app_id,\nrequest, response, timestamps"]
@@ -136,7 +136,7 @@ flowchart TD
     D2 --> E2
     D3 --> E3
 
-    %% Clean DB write path (ONLY from backend)
+    %% 🔥 Centered DB flow (clean vertical alignment)
     C --> A_DB
     A_DB --> META
 ```
