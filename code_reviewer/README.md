@@ -74,8 +74,8 @@ The middleware is the single entry point from the frontend. It calls this backen
        │                          │
        ▼                          ▼
 ┌──────────────────────────────────────┐
-│  MiddlewareClient                    │  → POST complete payload
-│  (dispatch to Spring Boot)           │     to middleware
+│  Application DB                      │  
+│                                      │  
 └──────────────────────────────────────┘
 ```
 
