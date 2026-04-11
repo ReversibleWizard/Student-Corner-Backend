@@ -1,141 +1,100 @@
 """
-Middleware client for dispatching completed review sessions.
+code_reviewer/services/middleware_client.py
 
-Sends the complete session payload (code, reviews, optimizations, chat history)
-to the Spring Boot middleware for persistent storage.
+HTTP client for communicating with the Spring Boot middleware.
+
+CHANGE SUMMARY (MongoDB migration)
+------------------------------------
+REMOVED:
+  - dispatch_review_result()  — review session data is now stored in MongoDB
+                                 by session_repository; no longer sent here.
+  - Any calls that POST completed review payloads to MIDDLEWARE_URL/sessions
+    or MIDDLEWARE_URL/reviews.
+
+KEPT:
+  - forward_request()   — generic passthrough for non-storage middleware ops.
+  - verify_token()      — JWT validation against the middleware.
+  - get_headers()       — standard auth header builder.
+
+DO NOT delete this file — it is imported by other parts of the agent.
 """
+
 import os
+import logging
+
 import httpx
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-)
 
-from code_reviewer.models import ReviewSession, MiddlewarePayload
-from code_reviewer.exceptions import MiddlewareDispatchFailedError
-from code_reviewer.logger import get_logger
+log = logging.getLogger("code_reviewer.middleware_client")
 
-log = get_logger("middleware_client")
+MIDDLEWARE_URL        = os.getenv("MIDDLEWARE_URL", "")
+MIDDLEWARE_AUTH_TOKEN = os.getenv("MIDDLEWARE_AUTH_TOKEN", "")
+REQUEST_TIMEOUT       = float(os.getenv("MIDDLEWARE_TIMEOUT", "10"))
 
 
-class MiddlewareClient:
-    """Client for dispatching review sessions to the middleware."""
-    
-    def __init__(self):
-        self.url = os.getenv("MIDDLEWARE_URL")
-        self.auth_token = os.getenv("MIDDLEWARE_AUTH_TOKEN")
-        self.enabled = bool(self.url)
-        
-        if not self.enabled:
-            log.warning("MIDDLEWARE_URL not set — session dispatch is disabled")
-    
-    def _build_headers(self) -> dict:
-        """Build HTTP headers for the middleware request."""
-        headers = {"Content-Type": "application/json"}
-        if self.auth_token:
-            headers["Authorization"] = f"Bearer {self.auth_token}"
-        return headers
-    
-    def _build_payload(self, session: ReviewSession) -> MiddlewarePayload:
-        """Convert ReviewSession to MiddlewarePayload."""
-        return MiddlewarePayload(
-            session_id=str(session.session_id),
-            user_id=session.user_id,
-            metadata=session.metadata,
-            original_code=session.original_code,
-            optimized_code=session.optimized_code,
-            understanding=session.understanding.model_dump() if session.understanding else None,
-            technical_review=session.technical_review.model_dump() if session.technical_review else None,
-            quality_review=session.quality_review.model_dump() if session.quality_review else None,
-            optimization_details=session.optimization_details.model_dump() if session.optimization_details else None,
-            chat_history=session.chat_history,
-            started_at=session.started_at.isoformat(),
-            completed_at=session.completed_at.isoformat() if session.completed_at else "",
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def get_headers() -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {MIDDLEWARE_AUTH_TOKEN}",
+        "Content-Type":  "application/json",
+    }
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+async def verify_token(token: str) -> dict | None:
+    """Validate a JWT with the Spring Boot middleware."""
+    if not MIDDLEWARE_URL:
+        log.warning("MIDDLEWARE_URL not configured — token verification skipped.")
+        return None
+
+    url = f"{MIDDLEWARE_URL}/auth/verify"
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            resp = await client.post(url, json={"token": token}, headers=get_headers())
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.HTTPStatusError as exc:
+        log.warning("Token verification failed  status=%s", exc.response.status_code)
+        return None
+    except Exception as exc:
+        log.error("Middleware error during token verification: %s", exc)
+        return None
+
+
+# ── Generic forwarding ────────────────────────────────────────────────────────
+
+async def forward_request(
+    path: str,
+    payload: dict,
+    method: str = "POST",
+) -> dict | None:
+    """
+    Forward a request to the middleware for non-storage purposes
+    (audit logs, notifications, etc.).
+
+    Session / review data storage goes to MongoDB — not here.
+    """
+    if not MIDDLEWARE_URL:
+        log.debug("MIDDLEWARE_URL not set — skipping forward_request to %s", path)
+        return None
+
+    url = f"{MIDDLEWARE_URL}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            if method.upper() == "POST":
+                resp = await client.post(url, json=payload, headers=get_headers())
+            elif method.upper() == "PUT":
+                resp = await client.put(url, json=payload, headers=get_headers())
+            else:
+                resp = await client.get(url, headers=get_headers())
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.HTTPStatusError as exc:
+        log.warning(
+            "Middleware request failed  status=%s  path=%s", exc.response.status_code, path
         )
-    
-    @retry(
-        stop=stop_after_attempt(4),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
-        retry=retry_if_exception_type((httpx.NetworkError, httpx.TimeoutException)),
-        reraise=True,
-    )
-    async def _send_request(self, payload: dict) -> dict:
-        """
-        Send POST request to middleware with retry logic.
-        
-        Retries on network errors and timeouts.
-        Does NOT retry on 4xx responses.
-        """
-        print(payload)
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                self.url,
-                json=payload,
-                headers=self._build_headers(),
-            )
-            
-            # Don't retry 4xx errors (client errors)
-            if 400 <= response.status_code < 500:
-                log.error(
-                    "Middleware rejected payload (HTTP %d): %s",
-                    response.status_code,
-                    response.text
-                )
-                raise MiddlewareDispatchFailedError(
-                    f"HTTP {response.status_code}: {response.text}"
-                )
-            
-            # Raise on 5xx to trigger retry
-            response.raise_for_status()
-            
-            return response.json()
-    
-    async def dispatch(self, session: ReviewSession) -> bool:
-        """
-        Dispatch a completed session to the middleware.
-        
-        Args:
-            session: ReviewSession to send
-            
-        Returns:
-            True if successful, False otherwise
-            
-        Raises:
-            MiddlewareDispatchFailedError: On unrecoverable failure (4xx)
-        """
-        if not self.enabled:
-            log.info("Middleware dispatch is disabled (MIDDLEWARE_URL not set)")
-            return False
-        
-        try:
-            payload = self._build_payload(session)
-            log.info(f"Dispatching session {session.session_id} to middleware")
-            
-            response_data = await self._send_request(payload.model_dump())
-            
-            log.info(
-                f"Successfully dispatched session {session.session_id} to middleware: {response_data}"
-            )
-            return True
-        
-        except MiddlewareDispatchFailedError:
-            # 4xx error — don't retry, re-raise
-            raise
-        
-        except Exception as e:
-            # All retries exhausted or unexpected error
-            log.error(
-                f"Failed to dispatch session {session.session_id} after all retries: {e}",
-                exc_info=True
-            )
-            # Log warning but don't fail the review — session is still valid
-            log.warning(
-                f"Session {session.session_id} was NOT saved to middleware but remains accessible via API"
-            )
-            return False
+    except Exception as exc:
+        log.error("Middleware request error  path=%s  error=%s", path, exc)
 
-
-# Global middleware client instance
-middleware_client = MiddlewareClient()
+    return None

@@ -1,40 +1,185 @@
-import httpx
-from ..logger import logger
+"""
+roadmap_generator/session_store.py
 
-MIDDLEWARE_URL = "http://localhost:8080/api/roadmap-history" # Ensure this matches your middleware URL
+In-memory registry for *active* roadmap-generation sessions, backed by
+MongoDB for durable persistence.
 
-async def send_to_middleware(session_id: str, final_roadmap: dict, chat_history: list, version: int):
-    """Sends the finalized session data to the middleware service asynchronously."""
-    payload = {
+Lifecycle
+---------
+1. session_store.start()       — create in-memory entry + MongoDB document
+2. session_store.update_step() — persist each generation step to MongoDB
+3. session_store.end()         — write final roadmap; keep in-memory entry
+4. session_store.remove()      — evict from in-memory dict after response sent
+
+Pipeline step field paths (examples)
+--------------------------------------
+    "pipeline.skill_analysis"
+    "pipeline.gap_detection"
+    "pipeline.roadmap_generation"
+
+In-memory dict schema (per session_id)
+---------------------------------------
+{
+    "session_id":  str,
+    "user_id":     str,
+    "status":      "active" | "ended" | "failed",
+    "roadmap":     {},   # latest roadmap snapshot
+    "meta":        {},
+}
+"""
+
+import logging
+from typing import Any
+
+from db.session_repository import session_repository
+
+log = logging.getLogger("roadmap_generator.session_store")
+
+# ── In-memory registry ────────────────────────────────────────────────────────
+session_store: dict[str, dict] = {}
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+async def start(
+    session_id: str,
+    user_id: str,
+    input_data: dict,
+    parent_session_id: str | None = None,
+) -> dict:
+    """
+    Register a new roadmap-generation session.
+
+    ``input_data`` should include the parsed resume / skill profile sent by
+    the Spring Boot middleware:
+        { "skills": [...], "target_role": "...", "experience_level": "..." }
+
+    Returns the in-memory session dict.
+    """
+    await session_repository.create_session({
+        "session_id":        session_id,
+        "parent_session_id": parent_session_id,
+        "user_id":           user_id,
+        "app_id":            "roadmap_generator",
+        "input":             input_data,
+        "status":            "in_progress",
+    })
+
+    entry = {
         "session_id": session_id,
-        "final_version": version,
-        "chat_history": chat_history,
-        "roadmap": final_roadmap
+        "user_id":    user_id,
+        "status":     "active",
+        "roadmap":    {},
+        "meta":       {},
     }
-    
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.post(MIDDLEWARE_URL, json=payload)
-            response.raise_for_status()
-            logger.info(f"Successfully synced session {session_id} to middleware.")
-    except Exception as e:
-        logger.error(f"Failed to sync session {session_id} to middleware: {str(e)}")
+    session_store[session_id] = entry
+    log.info(
+        "Roadmap session started  session_id=%s  user_id=%s", session_id, user_id
+    )
+    return entry
 
-async def fetch_from_middleware(session_id: str) -> dict:
-    """Retrieves a past session's data from the middleware."""
-    # Ensure this matches your middleware's actual GET URL
-    fetch_url = f"{MIDDLEWARE_URL}/{session_id}" 
-    
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(fetch_url)
-            response.raise_for_status()
-            return response.json()
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            return None # Not found in history
-        logger.error(f"Middleware returned error {e.response.status_code}")
-        raise e
-    except Exception as e:
-        logger.error(f"Failed to fetch session {session_id} from middleware: {str(e)}")
-        raise e
+
+async def update_step(
+    session_id: str,
+    field_path: str,
+    value: Any,
+) -> None:
+    """
+    Persist a pipeline step result to MongoDB.
+
+    Examples
+    --------
+        await update_step(sid, "pipeline.skill_analysis", {
+            "model":     "claude-sonnet",
+            "output":    { "existing_skills": [...], "skill_gaps": [...] },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+        await update_step(sid, "pipeline.roadmap_generation", {
+            "model":     "claude-opus",
+            "output":    { "phases": [...] },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+    """
+    await session_repository.update_session_step(session_id, field_path, value)
+
+    # Mirror roadmap output into memory for fast access by follow-up requests
+    if "roadmap_generation" in field_path and session_id in session_store:
+        roadmap_output = value.get("output")
+        if roadmap_output:
+            session_store[session_id]["roadmap"] = roadmap_output
+
+
+async def end(
+    session_id: str,
+    final_response: dict,
+    status: str = "completed",
+) -> None:
+    """
+    Mark the session as finished in MongoDB.
+
+    ``final_response`` example:
+        {
+            "roadmap":          { "phases": [...] },
+            "summary":          "12-week path to become a backend engineer",
+            "recommended_next": ["...", "..."],
+        }
+    """
+    await session_repository.complete_session(
+        session_id,
+        final_response=final_response,
+        status=status,
+    )
+    if session_id in session_store:
+        session_store[session_id]["status"] = "ended"
+
+    log.info(
+        "Roadmap session ended  session_id=%s  status=%s", session_id, status
+    )
+
+
+def remove(session_id: str) -> None:
+    """Evict the session from the in-memory registry."""
+    session_store.pop(session_id, None)
+    log.debug("Roadmap session removed from memory  session_id=%s", session_id)
+
+
+def get(session_id: str) -> dict | None:
+    """Return the in-memory session entry, or None if not present."""
+    return session_store.get(session_id)
+
+
+async def get_or_resume(
+    user_id: str,
+    session_id: str | None = None,
+) -> dict | None:
+    """
+    Resume logic — check in-memory first, then MongoDB.
+
+    Returns the MongoDB document of an existing in-progress session,
+    or None if no such session exists.
+    """
+    if session_id and session_id in session_store:
+        return session_store[session_id]
+
+    existing = await session_repository.get_active_session(
+        user_id=user_id,
+        app_id="roadmap_generator",
+    )
+    if existing:
+        log.info(
+            "Resuming existing roadmap session  session_id=%s  user_id=%s",
+            existing["session_id"], user_id,
+        )
+    return existing
+
+
+async def fail(session_id: str, reason: str = "unexpected error") -> None:
+    """Mark a session as failed (call inside except blocks)."""
+    await session_repository.fail_session(session_id, reason=reason)
+    if session_id in session_store:
+        session_store[session_id]["status"] = "failed"
+    log.warning(
+        "Roadmap session marked failed  session_id=%s  reason=%s",
+        session_id, reason,
+    )

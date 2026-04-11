@@ -12,6 +12,7 @@ dependencies = [
     "fastapi>=0.135.1",
     "ffmpeg>=1.4",
     "gradio>=6.9.0",
+    "motor>=3.7.1",
     "openai>=2.26.0",
     "openai-agents>=0.10.5",
     "pypdf>=6.7.5",
